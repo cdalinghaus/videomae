@@ -23,6 +23,8 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 
 import timm
+from PIL import Image
+import matplotlib.pyplot as plt
 
 assert timm.__version__ == "0.3.2"  # version check
 import timm.optim.optim_factory as optim_factory
@@ -87,7 +89,7 @@ def get_args_parser():
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
@@ -121,13 +123,87 @@ def main(args):
 
     # simple augmentation
     transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    print(dataset_train)
+            #transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+            #transforms.RandomHorizontalFlip(),
+            #transforms.ToTensor(),
+            #transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
 
+    def center_square_crop(video):
+        # Assuming `video` is a tensor of shape (T, H, W, C) or (T, C, H, W)
+        cropped_frames = []
+        for frame in video:
+            # Convert frame to PIL image
+            if isinstance(frame, torch.Tensor):
+                frame = transforms.ToPILImage()(frame)
+
+            # Center crop
+            width, height = frame.size
+            crop_size = min(width, height)
+            left = (width - crop_size) // 2
+            top = (height - crop_size) // 2
+            right = left + crop_size
+            bottom = top + crop_size
+            cropped_frame = frame.crop((left, top, right, bottom))
+
+            # Resize to square
+            resized_frame = cropped_frame.resize((56, 56), Image.BICUBIC)
+            cropped_frames.append(resized_frame)
+
+        return cropped_frames
+
+    # Transformation pipeline
+    transform_train = transforms.Compose([
+        transforms.Lambda(center_square_crop),  # Apply center crop to each frame
+        transforms.Lambda(lambda frames: [transforms.ToTensor()(frame) for frame in frames]),
+        
+        transforms.Lambda(lambda frames: torch.stack(frames)),
+        # Optional normalization (uncomment if needed)
+        # transforms.Lambda(lambda frames: [transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(frame) for frame in frames])
+    ])
+
+    #dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    
+    class Hackkinetics(datasets.Kinetics):
+        def __getitem__(self, idx):
+            video, _, info, video_idx = self.video_clips.get_clip(idx)
+            label = self.samples[video_idx][1]
+
+            if self.transform is not None:
+                video = self.transform(video)
+
+            return video, label
+    
+    dataset_train = Hackkinetics(
+        os.path.join(args.data_path),
+        frames_per_clip=16,
+        transform=transform_train,
+        num_workers=4,
+        _audio_samples=0,    # Prevents audio data from loading
+        _audio_channels=0,   # Prevents audio data from loading
+    )
+    """
+    # monkeypatch the getitem function to get rid of audio data
+    from torch import Tensor
+    from typing import Tuple
+    from types import MethodType
+    def new_getitem(self, idx: int) -> Tuple[Tensor, Tensor, int]:
+        video, audio, info, video_idx = self.video_clips.get_clip(idx)
+        label = self.samples[video_idx][1]
+
+        if self.transform is not None:
+            video = self.transform(video)
+
+        return video, label
+
+    dataset_train.__getitem__ = MethodType(new_getitem, dataset_train)
+    #dataset_train.__getitem__ = __getitem__
+    """
+
+    
+
+    print(dataset_train[0][1])
+        
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()

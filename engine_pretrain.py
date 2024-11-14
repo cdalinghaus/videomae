@@ -17,6 +17,9 @@ import torch
 import util.misc as misc
 import util.lr_sched as lr_sched
 
+import matplotlib.pyplot as plt
+
+from PIL import Image
 
 def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -42,10 +45,34 @@ def train_one_epoch(model: torch.nn.Module,
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
+        #print(samples.shape)
         samples = samples.to(device, non_blocking=True)
 
+        img_size = samples.shape[-1]
+        batch_size = samples.shape[0]
+        # Step 1: Permute to bring the frames dimension next to height and width
+        samples = samples.permute(0, 2, 1, 3, 4)  # shape [64, 3, 16, 128, 128]
+
+        # Step 2: Reshape frames into a 4x4 grid
+        samples = samples.reshape(batch_size, 3, 4, 4, img_size, img_size)  # shape [64, 3, 4, 4, 128, 128]
+
+        # Step 3: Permute to arrange the grid along height and width
+        samples = samples.permute(0, 1, 2, 4, 3, 5)  # shape [64, 3, 4, 128, 4, 128]
+
+        # Step 4: Reshape to combine the grid into one large image
+        samples = samples.reshape(batch_size, 3, 4 * img_size, 4 * img_size)  # shape [64, 3, 512, 512]
+
         with torch.cuda.amp.autocast():
-            loss, _, _ = model(samples, mask_ratio=args.mask_ratio)
+            loss, _pred, _mask = model(samples, mask_ratio=args.mask_ratio)
+
+        if data_iter_step % 250 == 0:
+            unpatched = model.unpatchify(_pred).float()
+            combined = torch.cat([unpatched[0].detach().cpu().T, samples[0].detach().cpu().T], axis=0)
+
+            log_writer.add_image(f'Example reconstruction from train set', combined.detach().cpu().T, epoch)
+
+            del combined
+            del unpatched
 
         loss_value = loss.item()
 
